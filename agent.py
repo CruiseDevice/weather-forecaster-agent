@@ -37,13 +37,12 @@ def geocode(city: str) -> str:
         timeout=TIMEOUT,
     )
     response.raise_for_status()
-    response.raise_for_status()
     results = response.json()
     if not results:
         return f"No results found for '{city}'"
-    lat = results[0]['lat']
-    lon = results[0]['lon']
-    return f"{lat:.4}, {lon:.4}"
+    lat = float(results[0]['lat'])
+    lon = float(results[0]['lon'])
+    return f"{lat:.4f}, {lon:.4f}"
 
 
 TOOLS = {
@@ -69,7 +68,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "geocode",
-            "description": "GET a co-ordinates from the NWS API (api.weather.gov) when a location is given in query, returns the JSON body.",
+            "description": "GET a co-ordinates from the Nominatim API when a location is given in query, returns the JSON body.",
             "parameters": {
                 "type": "object",
                 "properties": {"city": {"type": "string"}},
@@ -93,10 +92,24 @@ Rules:
 - If geocoding fails or the place is ambiguous, ask the user to clarify instead of guessing.
 - The NWS API only covers the US; if the location is outside the US, say so instead of calling the API.
 
-Answer in plain language, one line per period, like: Tonight: 54°F — Partly Cloudy"""
+Once you have all the data, return it as-is. Do not format or summarize
+"""
 
 
-def agent_run(user_query: str) -> str:
+def format_answer(user_query: str, raw_data: str) -> str:
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": """Format the following weather data into a clear,
+            human-readable answer. One line per forecast period, like: Tonight: 54°F — Partly Cloudy. Be concise.
+            """},
+            {"role": "user", "content": f"Question: {user_query}\n\nData:\n{raw_data}"},
+        ],
+    )
+    return response.choices[0].message.content
+
+
+def fetch_weather_data(user_query: str) -> str:
     messages = [{"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_query}]
 
@@ -123,6 +136,11 @@ def agent_run(user_query: str) -> str:
 
     return "Run out of iterations"
 
+
+def agent_run(user_query: str) -> str:
+    raw_data = fetch_weather_data(user_query)
+    formatted = format_answer(user_query, raw_data)
+    return formatted
 
 def main() -> None:
     print(agent_run(" ".join(sys.argv[1:]) or "Forecast for Seattle"))
