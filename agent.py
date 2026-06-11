@@ -1,9 +1,15 @@
 import json
+import logging
 import os
 import sys
+import time
 
 import httpx
 from openai import OpenAI
+
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+logger = logging.getLogger(__name__)
+CACHE_FILE = ".cache.json"
 
 client = OpenAI(base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
                 api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"))
@@ -18,7 +24,38 @@ class WeatherFetchError(Exception):
      """Raised when the NWS API request fails."""
 
 
-def http_request(url: str) -> str:
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def _save_cache():
+    with open(CACHE_FILE, "w") as f:
+        json.dump(_cache, f)
+
+
+_cache = load_cache()  # key -> (value, timestamp)
+
+
+def cached_get(key: str, ttl_seconds: int, fetch_fn):
+    now = time.time()
+    if key in _cache:
+        value, stored_at = _cache[key]
+        if now - stored_at < ttl_seconds:
+            logger.info("cache HIT %s (age %.0fs)", key, now - stored_at)
+            return value
+        logger.info("cache EXPIRED %s", key)
+    else:
+        logger.info("cache MISS %s", key)
+    result = fetch_fn()
+    _cache[key] = (result, now)
+    _save_cache()
+    return result
+
+
+def _http_request_uncached(url: str) -> str:
     if not url.startswith("https://api.weather.gov/"):
         return "Error: only api.weather.gov URLs allowed."
     try:
@@ -28,8 +65,12 @@ def http_request(url: str) -> str:
     except httpx.HTTPError as e:
         raise WeatherFetchError(f"NWS request failed: {e}") from e
 
+    
+def http_request(url: str) -> str:
+    return cached_get(f"http:{url}", ttl_seconds=300, fetch_fn=lambda: _http_request_uncached(url))
 
-def geocode(city: str) -> str:
+
+def _geocode_uncached(city: str) -> str:
     response = httpx.get(
         "https://nominatim.openstreetmap.org/search",
         params={"q": city, "format": "json", "limit": 1},
@@ -43,6 +84,10 @@ def geocode(city: str) -> str:
     lat = float(results[0]['lat'])
     lon = float(results[0]['lon'])
     return f"{lat:.4f}, {lon:.4f}"
+
+
+def geocode(city: str) -> str:
+    return cached_get(f"geo: {city.strip().lower()}", ttl_seconds=86400, fetch_fn=lambda: _geocode_uncached(city))
 
 
 TOOLS = {
